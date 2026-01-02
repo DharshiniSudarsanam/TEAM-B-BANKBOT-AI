@@ -1,0 +1,394 @@
+# bankbot_ollama_sidebar_autoclear.py
+import streamlit as st
+import requests, json, os, hashlib, time, re
+
+# PDF reading
+from PyPDF2 import PdfReader
+
+# OCR for images
+from PIL import Image
+import pytesseract
+
+from bankbot_guard import (
+    validate_banking_query,
+    BANKING_SYSTEM_PROMPT,
+    banking_only_message
+)
+# --------------------------
+# Configuration
+# --------------------------
+OLLAMA_API = "http://localhost:11434/api/generate"
+DEFAULT_MODEL = "llama3.2"
+USERS_DB = "bankbot_users.json"
+
+# --------------------------
+# User authentication
+# --------------------------
+def _ensure_users_db():
+    if not os.path.exists(USERS_DB):
+        with open(USERS_DB,"w") as f: json.dump({},f)
+def _hash_pwd(pwd): return hashlib.sha256(pwd.encode()).hexdigest()
+def create_user(username,password,full_name=""):
+    _ensure_users_db()
+    with open(USERS_DB,"r") as f:data=json.load(f)
+    if username in data:return False
+    data[username]={"password":_hash_pwd(password),"full_name":full_name,"created_at":time.time()}
+    with open(USERS_DB,"w") as f: json.dump(data,f)
+    return True
+def check_user(username,password):
+    _ensure_users_db()
+    with open(USERS_DB,"r") as f:data=json.load(f)
+    if username not in data:return False
+    return data[username]["password"]==_hash_pwd(password)
+
+# --------------------------
+# Ollama call
+# --------------------------
+def call_ollama(prompt:str, model:str=DEFAULT_MODEL, timeout:int=180) -> str:
+    payload={"model":model,"prompt":prompt,"stream":False}
+    headers={"Content-Type":"application/json"}
+    try:
+        r=requests.post(
+            OLLAMA_API,
+            headers=headers,
+            data=json.dumps(payload),
+            timeout=timeout
+        )
+        r.raise_for_status()
+        data=r.json()
+        if isinstance(data,dict):
+            if "response" in data:
+                return data["response"]
+            if "text" in data:
+                return data["text"]
+        return str(data)
+    except Exception as e:
+        return f"[Ollama error] {e}"
+
+# --------------------------
+# Chat title extraction
+# --------------------------
+STOPWORDS={"a","an","the","and","or","is","are","am","to","for","in","on","of","my","me","i","you","please",
+           "how","what","why","where","when","do","does","can","could","should","help","about"}
+def derive_chat_title(text:str,fallback_index:int=1) -> str:
+    if not text or not text.strip(): return f"Chat {fallback_index}"
+    s=re.sub(r"[^\w\s]"," ",text.lower()).strip()
+    words=[w for w in s.split() if w not in STOPWORDS]
+    if not words: words=re.sub(r"\s+"," ",re.sub(r"[^\w\s]","",text)).strip().split()
+    if not words: return f"Chat {fallback_index}"
+    title=" ".join(words[:3]).title()
+    return title if len(title)<=30 else title[:27].rstrip()+"..."
+
+# --------------------------
+# Prompt builder
+# --------------------------
+def build_prompt(question:str,user:str="", file_text:str="")->str:
+    user_ctx=f"User: {user}\n\n" if user else ""
+    file_ctx=f"Refer to the uploaded document content below:\n{file_text}\n\n" if file_text else ""
+    return f"""{BANKING_SYSTEM_PROMPT}
+
+{user_ctx}{file_ctx}
+Question: {question}
+
+Answer:"""
+
+# --------------------------
+# Theme CSS with glowing effects (final)
+# --------------------------
+def inject_css(theme:str="Modern Blue Banking"):
+    common = """
+body{margin:0;padding:0}.main .block-container{padding:1rem 2rem}.header-title{font-size:20px;color:black !important;font-weight:700}
+.welcome-text{color:black !important;font-size:14px;margin-top:4px}.sidebar-item{display:block;padding:8px 10px;border-radius:8px;margin-bottom:6px;text-align:left}
+.sidebar-chat-title-btn{background:transparent;color:inherit;text-align:left;border:none;padding:0;font-size:14px}.menu-btn{background:transparent;border:none;color:inherit;font-size:16px;padding:4px 6px}.chat-count{font-size:12px;color:inherit;opacity:0.85}
+"""
+    if theme=="Modern Blue Banking":
+        css = f"""{common}
+[data-testid="stSidebar"]>div:first-child{{background:linear-gradient(180deg,#0b3d91,#0a2f6a);color:white;}}
+.user-bubble{{background:linear-gradient(90deg,#1f7de1,#1a5fc8);color:white;padding:10px 14px;border-radius:18px;display:inline-block;max-width:70%;margin:6px 0;}}
+.bot-bubble{{background:#ffffff;color:#072b6b;padding:10px 14px;border-radius:18px;display:inline-block;max-width:70%;margin:6px 0;border:1px solid rgba(7,43,107,0.06);}}
+"""
+    elif theme=="Dark":
+        css = f"""{common}
+body{{background:#0b1220;color:#e6eef8}}
+[data-testid="stSidebar"]>div:first-child{{background:linear-gradient(180deg,#071228,#0b0f1a);color:#e6eef8}}
+.user-bubble{{background:#184e9b;color:white;padding:10px 14px;border-radius:18px;display:inline-block;max-width:70%;margin:6px 0}}
+.bot-bubble{{background:#0b1320;color:#d6e6ff;padding:10px 14px;border-radius:18px;display:inline-block;max-width:70%;margin:6px 0;border:1px solid rgba(255,255,255,0.04)}}
+"""
+    else:
+        css = f"""{common}
+body{{background:#ffffff;color:#0f1724}}
+[data-testid="stSidebar"]>div:first-child{{background:linear-gradient(180deg,#f5f7fb,#eef2fb);color:#072b6b}}
+.user-bubble{{background:#0b63d6;color:white;padding:10px 14px;border-radius:18px;display:inline-block;max-width:70%;margin:6px 0}}
+.bot-bubble{{background:#ffffff;color:#072b6b;padding:10px 14px;border-radius:18px;display:inline-block;max-width:70%;margin:6px 0;border:1px solid rgba(7,43,107,0.06)}}
+"""
+
+    st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+
+    st.markdown("""
+    <style>
+    @keyframes pulseGlow {
+        0% { box-shadow: 0 0 8px rgba(26,95,200,0.6), 0 0 16px rgba(26,95,200,0.45); }
+        50% { box-shadow: 0 0 18px rgba(26,95,200,0.9), 0 0 30px rgba(26,95,200,0.65); }
+        100% { box-shadow: 0 0 8px rgba(26,95,200,0.6), 0 0 16px rgba(26,95,200,0.45); }
+    }
+
+    .card {
+        background: #1a5fc8;
+        border-radius: 12px;
+        padding: 12px 16px;
+        animation: pulseGlow 2.4s infinite;
+    }
+    .card .header-title,
+    .card .welcome-text {
+        color: white !important;
+    }
+
+    .assistant-title.card {
+        color: white !important;
+        background: #1a5fc8;
+        padding: 12px 18px;
+        border-radius: 12px;
+        animation: pulseGlow 2.4s infinite;
+        margin-top: -48px;
+        margin-bottom: 14px;
+        text-align: center;
+        font-weight: 700;
+        display: block;
+    }
+
+    /* Soft sidebar glow with hover highlights */
+    [data-testid="stSidebar"]>div:first-child {
+        box-shadow: inset 0 0 16px rgba(26,95,200,0.2);
+        transition: box-shadow 0.3s ease;
+    }
+    [data-testid="stSidebar"]>div:first-child:hover {
+        box-shadow: inset 0 0 28px rgba(26,95,200,0.35);
+    }
+    [data-testid="stSidebar"] .stButton, [data-testid="stSidebar"] .stTextInput {
+        transition: background 0.2s ease, color 0.2s ease;
+    }
+    [data-testid="stSidebar"] .stButton:hover {
+        background-color: rgba(26,95,200,0.15) !important;
+        color: #1a5fc8 !important;
+    }
+
+    [data-testid="stSidebar"] .css-1d391kg { width: 320px !important; }
+
+    .main .block-container {
+        box-shadow: inset 8px 0 12px -6px rgba(26,95,200,0.3), inset -8px 0 12px -6px rgba(26,95,200,0.3);
+        border-radius: 8px;
+        animation: pulseGlow 2.4s infinite;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --------------------------
+# Login/Signup
+# --------------------------
+def show_login():
+    st.markdown(
+        "<div class='card'>"
+        "<h2 class='header-title'>Welcome to BankBot</h2>"
+        "<div class='welcome-text'>Sign in to access FAQ chat.</div>"
+        "</div>",
+        unsafe_allow_html=True
+    )
+    st.write("")
+    with st.form("login_form"):
+        username=st.text_input("Username")
+        password=st.text_input("Password",type="password")
+        submitted=st.form_submit_button("Sign in")
+        if submitted:
+            if check_user(username,password):
+                st.session_state.authenticated=True
+                st.session_state.username=username
+                st.success("Signed in.")
+                st.rerun()
+            else:
+                st.error("Invalid username or password.")
+    st.markdown("---")
+    st.write("Don't have an account? Create one below.")
+    with st.form("signup_form"):
+        new_user=st.text_input("Choose username",key="su_user")
+        new_full=st.text_input("Full name",key="su_name")
+        new_pwd=st.text_input("Choose password",type="password",key="su_pwd")
+        create=st.form_submit_button("Create account")
+        if create:
+            if not new_user or not new_pwd:
+                st.error("Provide username and password.")
+            else:
+                ok=create_user(new_user,new_pwd,new_full)
+                if ok:
+                    st.success("Account created. Please sign in.")
+                else:
+                    st.error("Username already exists.")
+
+# --------------------------
+# Main App
+# --------------------------
+def main_app():
+    st.set_page_config(page_title="BankBot", layout="wide")
+    defaults = {
+        "authenticated":False, "username":"", "chats":[], "current_chat":None,
+        "theme":"Modern Blue Banking", "sidebar_menu_chat":None, "rename_input":"",
+        "confirm_delete":False
+    }
+    for k,v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k]=v
+
+    inject_css(st.session_state.theme)
+
+    # --------------------------
+    # Sidebar
+    # --------------------------
+    uploaded_file_text = ""
+    with st.sidebar:
+        st.markdown("<h2 style='color:inherit'>BankBot</h2>",unsafe_allow_html=True)
+        st.markdown("<b>Chat History</b>",unsafe_allow_html=True)
+
+        if not st.session_state.chats:
+            st.markdown("No chats yet.",unsafe_allow_html=True)
+        else:
+            for idx, chat in enumerate(st.session_state.chats):
+                chat_id=chat["id"]
+                title=chat.get("title") or derive_chat_title((chat["messages"][0]["text"] if chat["messages"] else ""),fallback_index=idx+1)
+                cols=st.columns([0.85,0.15])
+                with cols[0]:
+                    if st.button(title,key=f"open_chat_{chat_id}"):
+                        st.session_state.current_chat=chat_id
+                        st.rerun()
+                with cols[1]:
+                    if st.button("⋮",key=f"menu_{chat_id}"):
+                        st.session_state.sidebar_menu_chat=chat_id if st.session_state.sidebar_menu_chat!=chat_id else None
+                        st.rerun()
+                if st.session_state.sidebar_menu_chat==chat_id:
+                    rename_col, delete_col=st.columns([0.7,0.3])
+                    with rename_col:
+                        new_title=st.text_input(f"Rename chat {chat_id}",value=chat.get("title",title),key=f"rename_input_{chat_id}")
+                        if st.button("Save",key=f"save_rename_{chat_id}"):
+                            chat["title"]=new_title.strip() or chat["title"]
+                            st.session_state.sidebar_menu_chat=None
+                            st.rerun()
+                    with delete_col:
+                        if st.button("Delete",key=f"delete_btn_{chat_id}"):
+                            st.session_state.confirm_delete=chat_id
+                            st.rerun()
+                    if st.session_state.confirm_delete==chat_id:
+                        confirm_cols=st.columns([0.6,0.4])
+                        with confirm_cols[0]:
+                            st.markdown("Confirm delete?")
+                        with confirm_cols[1]:
+                            if st.button("Yes",key=f"confirm_delete_yes_{chat_id}"):
+                                st.session_state.chats=[c for c in st.session_state.chats if c["id"]!=chat_id]
+                                if st.session_state.current_chat==chat_id:
+                                    st.session_state.current_chat=None
+                                st.session_state.sidebar_menu_chat=None
+                                st.session_state.confirm_delete=False
+                                st.rerun()
+                            if st.button("No",key=f"confirm_delete_no_{chat_id}"):
+                                st.session_state.confirm_delete=False
+                                st.rerun()
+
+        st.markdown("---")
+
+        # ---------------------- FILE UPLOAD with OCR ----------------------
+        st.subheader("📤 Upload File")
+        uploaded_file = st.file_uploader("Upload a file", type=["pdf","txt","jpg","png"])
+        if uploaded_file:
+            try:
+                if uploaded_file.type=="application/pdf":
+                    pdf_reader = PdfReader(uploaded_file)
+                    uploaded_file_text = ""
+                    for page in pdf_reader.pages:
+                        uploaded_file_text += page.extract_text() + "\n"
+                elif uploaded_file.type=="text/plain":
+                    uploaded_file_text = str(uploaded_file.read(), encoding="utf-8")
+                elif "image" in uploaded_file.type:
+                    img = Image.open(uploaded_file)
+                    uploaded_file_text = pytesseract.image_to_string(img)
+                st.success(f"Uploaded: {uploaded_file.name}")
+            except Exception as e:
+                st.error(f"Error reading file: {e}")
+        # ---------------------------------------------------------
+
+        if st.button("New Chat", key="new_chat_btn"):
+            chat_id=str(int(time.time()*1000))
+            st.session_state.chats.insert(0,{"id":chat_id,"title":"","messages":[],"created_at":time.time()})
+            st.session_state.current_chat=chat_id
+            st.rerun()
+
+        theme_choice=st.selectbox("Theme",["Modern Blue Banking","Light","Dark"],index=["Modern Blue Banking","Light","Dark"].index(st.session_state.theme))
+        if theme_choice!=st.session_state.theme:
+            st.session_state.theme=theme_choice
+            inject_css(st.session_state.theme)
+            st.rerun()
+
+        if st.session_state.authenticated:
+            st.markdown(f"Signed in as **{st.session_state.username}**")
+            if st.button("Change account", key="change_account_btn"):
+                st.session_state.authenticated=False
+                st.session_state.username=""
+                st.rerun()
+        else:
+            if st.button("Login / Sign up", key="login_signup_btn"):
+                st.session_state.page="Login"
+                st.rerun()
+        if st.button("Logout", key="logout_btn"):
+            st.session_state.authenticated=False
+            st.session_state.username=""
+            st.rerun()
+
+    # --------------------------
+    # Auth check
+    # --------------------------
+    if not st.session_state.authenticated:
+        show_login()
+        return
+
+    # --------------------------
+    # Main Chat
+    # --------------------------
+    st.markdown("<h2 class='assistant-title card'>BankBot — FAQ Assistant</h2>", unsafe_allow_html=True)
+    chat_display = st.empty()
+
+    if st.session_state.current_chat:
+        chat = next((c for c in st.session_state.chats if c["id"]==st.session_state.current_chat), None)
+        if chat:
+            with chat_display.container():
+                for m in chat["messages"]:
+                    cls="user-bubble" if m["role"]=="user" else "bot-bubble"
+                    st.markdown(f"<div class='{cls}'>{m['text']}</div>",unsafe_allow_html=True)
+
+    # -----------------------------
+    # INPUT FORM: auto-clearing, moved down 3 steps (~90px)
+    # -----------------------------
+    st.markdown("<div style='height:90px'></div>", unsafe_allow_html=True)
+
+    with st.form(key="message_form", clear_on_submit=True):
+        user_text = st.text_input("Type your message here", key="input_field")
+        submit = st.form_submit_button("Send")
+
+        if submit and user_text.strip():
+            if st.session_state.current_chat is None:
+                new_id = str(int(time.time()*1000))
+                st.session_state.chats.append({"id": new_id, "title": "", "messages": [], "created_at": time.time()})
+                st.session_state.current_chat = new_id
+
+            chat = next(c for c in st.session_state.chats if c["id"] == st.session_state.current_chat)
+            chat["messages"].append({"role": "user", "text": user_text})
+            if not chat.get("title"):
+                chat["title"] = derive_chat_title(user_text)
+
+            prompt = build_prompt(user_text, user=st.session_state.username, file_text=uploaded_file_text)
+            with st.spinner("Generating answer from Ollama..."):
+                reply = call_ollama(prompt)
+            chat["messages"].append({"role": "bot", "text": reply})
+
+            with chat_display.container():
+                for m in chat["messages"]:
+                    cls="user-bubble" if m["role"]=="user" else "bot-bubble"
+                    st.markdown(f"<div class='{cls}'>{m['text']}</div>",unsafe_allow_html=True)
+
+if __name__=="__main__":
+    main_app()
