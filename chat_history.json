@@ -1,0 +1,14 @@
+{
+    "conversations": {
+        "a44b7d33-a032-4b63-b5df-ff0e707f57ee": {
+            "title": "New Chat",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "text": "Hello! I'm BankBot \u2014 how can I help you today?"
+                }
+            ]
+        }
+    },
+    "active_chat": "a44b7d33-a032-4b63-b5df-ff0e707f57ee"
+}
