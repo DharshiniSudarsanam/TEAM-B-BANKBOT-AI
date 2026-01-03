@@ -17,3 +17,4 @@ def generate_ai_reply(prompt: str) -> str:
         return response["message"]["content"]
     except Exception as e:
         return f"AI Error: {e}"
+
